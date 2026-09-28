@@ -14,28 +14,47 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS styling to make the interface look visually engaging
+# Custom CSS styling with ANIMATED BACKGROUND and Frosted Glass Cards
 st.markdown("""
     <style>
-    .main {
-        background-color: #0f172a;
+    /* 1. The Soothing Animated Background */
+    .stApp {
+        background: linear-gradient(-45deg, #0f172a, #172554, #064e3b, #1e1b4b);
+        background-size: 400% 400%;
+        animation: gradientBG 15s ease infinite;
     }
+
+    @keyframes gradientBG {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+    }
+
+    /* Make Streamlit's default top header transparent so it doesn't block the animation */
+    header {
+        background: transparent !important;
+    }
+
+    /* 2. Frosted Glass Effect (Glassmorphism) for the cards */
     .metric-card {
-        background-color: #1e293b;
+        background-color: rgba(30, 41, 59, 0.75); /* Semi-transparent */
+        backdrop-filter: blur(10px); /* Blurs the moving background behind it */
         padding: 15px;
         border-radius: 10px;
         border-left: 5px solid #3b82f6;
         margin-bottom: 10px;
     }
     .status-box-normal {
-        background-color: #064e3b;
+        background-color: rgba(6, 78, 59, 0.75);
+        backdrop-filter: blur(10px);
         color: #6ee7b7;
         padding: 15px;
         border-radius: 8px;
         border: 1px solid #059669;
     }
     .status-box-attack {
-        background-color: #881337;
+        background-color: rgba(136, 19, 55, 0.85);
+        backdrop-filter: blur(10px);
         color: #fca5a5;
         padding: 15px;
         border-radius: 8px;
