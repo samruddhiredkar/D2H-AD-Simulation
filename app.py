@@ -3,124 +3,278 @@ import pandas as pd
 import numpy as np
 from collections import deque
 import time
-import subprocess
 import os
 
-# --- Page Configuration ---
-st.set_page_config(page_title="D2H-AD Simulation", layout="wide")
+# ==========================================
+# 1. PAGE SETUP & STYLING
+# ==========================================
+st.set_page_config(
+    page_title="D2H-AD: Network Threat Monitor",
+    page_icon="🛡️",
+    layout="wide"
+)
 
-st.title("🛡️ D2H-AD: Hyperdimensional Anomaly Detection Engine")
-st.caption("Phase 1 Real-time Network Telemetry Simulation | 9-Packet Sliding Window")
+# Custom CSS styling to make the interface look visually engaging
+st.markdown("""
+    <style>
+    .main {
+        background-color: #0f172a;
+    }
+    .metric-card {
+        background-color: #1e293b;
+        padding: 15px;
+        border-radius: 10px;
+        border-left: 5px solid #3b82f6;
+        margin-bottom: 10px;
+    }
+    .status-box-normal {
+        background-color: #064e3b;
+        color: #6ee7b7;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #059669;
+    }
+    .status-box-attack {
+        background-color: #881337;
+        color: #fca5a5;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #e11d48;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
-# --- 1. Load Dataset ---
-# Update this filename if your uploaded CSV has a different name
-CSV_FILENAME = "sample_traffic.csv"
+# Main Title and Subtitle
+st.title("🛡️ D2H-AD: Network Anomaly Detection System")
+st.markdown("### Real-Time Telemetry & Threat Severity Monitoring")
+st.write("---")
+
+# ==========================================
+# 2. DATA LOADING FUNCTION
+# ==========================================
+# We load our lightweight network dataset into memory
+dataset_path = "sample_traffic.csv"
 
 @st.cache_data
-def load_data():
-    if os.path.exists(CSV_FILENAME):
-        # Load the uploaded file (limiting to 2,000 rows for rapid startup)
-        df = pd.read_csv(CSV_FILENAME, nrows=2000)
-    elif os.path.exists("sample_traffic.csv"):
-        df = pd.read_csv("sample_traffic.csv")
+def load_network_dataset():
+    # Check if our sample file exists in the folder
+    if os.path.exists(dataset_path):
+        data_frame = pd.read_csv(dataset_path)
     else:
-        # Fallback dummy data if no CSV is uploaded yet
-        df = pd.DataFrame({
-            ' Destination Port': [80, 443, 80, 80, 80, 80, 443, 80],
-            ' Flow Duration': [12000, 8500, 3400, 500, 300, 250, 15000, 9200],
-            ' Total Fwd Packets': [4, 6, 2, 120, 150, 180, 5, 3],
-            ' Total Backward Packets': [3, 5, 2, 0, 0, 0, 4, 3],
-            ' Label': ['BENIGN', 'BENIGN', 'BENIGN', 'DDoS', 'DDoS', 'DDoS', 'BENIGN', 'BENIGN']
-        })
-    # Clean up whitespace in column names
-    df.columns = df.columns.str.strip()
-    return df
-
-data = load_data()
-
-# --- 2. Simulation State & Ring Buffer ---
-if 'buffer' not in st.session_state:
-    st.session_state.buffer = deque(maxlen=9)
-if 'history' not in st.session_state:
-    st.session_state.history = []
-
-# --- 3. D2H-AD Threat Math (HDC Distance & Density) ---
-def compute_severity(row, buffer):
-    """
-    Computes a 1-10 Severity score using Hamming distance & buffer density.
-    """
-    # Create an arbitrary 10,000-bit pseudo-vector based on flow features
-    fwd_pkts = float(row.get('Total Fwd Packets', 1))
-    bwd_pkts = float(row.get('Total Backward Packets', 1))
-    duration = float(row.get('Flow Duration', 1))
+        # Fallback dummy data if sample_traffic.csv is missing
+        backup_data = {
+            'Destination Port': [80, 443, 80, 80, 80, 80, 443, 80],
+            'Flow Duration': [12000, 8500, 3400, 500, 300, 250, 15000, 9200],
+            'Total Fwd Packets': [4, 6, 2, 120, 150, 180, 5, 3],
+            'Total Backward Packets': [3, 5, 2, 0, 0, 0, 4, 3],
+            'Label': ['BENIGN', 'BENIGN', 'BENIGN', 'DDoS', 'DDoS', 'DDoS', 'BENIGN', 'BENIGN']
+        }
+        data_frame = pd.DataFrame(backup_data)
     
-    # Asymmetry ratio: high forward requests with 0 backward replies = DDoS indicator
-    ratio = fwd_pkts / (bwd_pkts + 1.0)
+    # Strip extra spaces from column headers
+    cleaned_columns = []
+    for column_name in data_frame.columns:
+        cleaned_columns.append(column_name.strip())
+    data_frame.columns = cleaned_columns
     
-    # Baseline distance calculation (scaled 1-10)
-    if ratio > 10.0 or duration < 500:
-        base_distance = 8.5 + np.random.uniform(0.1, 1.4)  # High Distance (Anomaly)
+    return data_frame
+
+# Load the dataset
+network_data = load_network_dataset()
+
+# ==========================================
+# 3. INITIALIZE SESSION STATE
+# ==========================================
+# Session state stores our ring buffer and history so Streamlit doesn't reset them
+if 'packet_buffer' not in st.session_state:
+    st.session_state.packet_buffer = deque(maxlen=9)
+
+if 'threat_history' not in st.session_state:
+    st.session_state.threat_history = []
+
+if 'total_packets_processed' not in st.session_state:
+    st.session_state.total_packets_processed = 0
+
+if 'total_threats_detected' not in st.session_state:
+    st.session_state.total_threats_detected = 0
+
+# ==========================================
+# 4. SEVERITY MATH CALCULATION
+# ==========================================
+def calculate_threat_severity(packet_row, current_buffer):
+    """
+    Calculates a severity score from 1 to 10 based on packet asymmetry 
+    and flow duration.
+    """
+    # Extract feature values safely with default fallbacks
+    if 'Total Fwd Packets' in packet_row:
+        forward_packets = float(packet_row['Total Fwd Packets'])
     else:
-        base_distance = 1.5 + np.random.uniform(0.1, 1.2)  # Low Distance (Normal)
+        forward_packets = 1.0
+
+    if 'Total Backward Packets' in packet_row:
+        backward_packets = float(packet_row['Total Backward Packets'])
+    else:
+        backward_packets = 1.0
+
+    if 'Flow Duration' in packet_row:
+        duration_time = float(packet_row['Flow Duration'])
+    else:
+        duration_time = 1.0
+
+    # Calculate packet ratio (forward vs backward)
+    # High forward packets with zero or low backward packets indicates a flood attack
+    packet_ratio = forward_packets / (backward_packets + 1.0)
+
+    # Determine base threat score
+    if packet_ratio > 10.0 or duration_time < 500:
+        # High likelihood of attack
+        random_spike = np.random.uniform(0.1, 1.4)
+        calculated_score = 8.5 + random_spike
+    else:
+        # Normal traffic pattern
+        random_variation = np.random.uniform(0.1, 1.2)
+        calculated_score = 1.5 + random_variation
+
+    # Round the final score and clip it between 1 and 10
+    rounded_score = int(round(calculated_score))
+    
+    if rounded_score > 10:
+        final_severity = 10
+    elif rounded_score < 1:
+        final_severity = 1
+    else:
+        final_severity = rounded_score
+
+    return final_severity
+
+# ==========================================
+# 5. SIDEBAR & STATS PANEL
+# ==========================================
+st.sidebar.title("🎮 Control Panel")
+st.sidebar.subheader("Simulation Options")
+
+simulation_speed = st.sidebar.slider("Delay between packets (seconds):", 0.05, 1.0, 0.2)
+start_button = st.sidebar.button("▶️ Start Live Telemetry", use_container_width=True)
+
+st.sidebar.write("---")
+st.sidebar.subheader("📊 Session Statistics")
+stat_total_packets = st.sidebar.empty()
+stat_total_threats = st.sidebar.empty()
+
+stat_total_packets.metric(label="Total Packets Processed", value=st.session_state.total_packets_processed)
+stat_total_threats.metric(label="DDoS Spikes Blocked", value=st.session_state.total_threats_detected)
+
+# ==========================================
+# 6. DASHBOARD LAYOUT COLUMNS
+# ==========================================
+column_feed, column_chart, column_action = st.columns([1.2, 1.8, 1.4])
+
+with column_feed:
+    st.subheader("📥 Incoming Telemetry")
+    feed_display = st.empty()
+
+with column_chart:
+    st.subheader("📈 Live Threat Score (1-10 Scale)")
+    chart_display = st.empty()
+
+with column_action:
+    st.subheader("⚡ Automated Mitigation")
+    status_display = st.empty()
+    terminal_display = st.empty()
+
+# ==========================================
+# 7. MAIN SIMULATION LOOP
+# ==========================================
+if start_button:
+    # Reset history on new run
+    st.session_state.threat_history = []
+    st.session_state.total_packets_processed = 0
+    st.session_state.total_threats_detected = 0
+
+    # Iterate row by row through the network dataset
+    for packet_index, packet_data in network_data.iterrows():
         
-    severity = int(np.clip(round(base_distance), 1, 10))
-    return severity
-
-# --- 4. Dashboard Layout ---
-col_feed, col_chart, col_action = st.columns([1.2, 1.5, 1.3])
-
-with col_feed:
-    st.subheader("📥 Simulated Ingestion Feed")
-    feed_placeholder = st.empty()
-
-with col_chart:
-    st.subheader("📈 Threat Score (1-10)")
-    chart_placeholder = st.empty()
-
-with col_action:
-    st.subheader("⚡ Action & Mitigation")
-    status_placeholder = st.empty()
-    terminal_placeholder = st.empty()
-
-# --- 5. Execution Controls ---
-start_btn = st.button("▶️ Start Live Telemetry")
-
-if start_btn:
-    for idx, row in data.iterrows():
-        # Step A: Push into 9-packet ring buffer
-        st.session_state.buffer.append(row.to_dict())
+        # Step 1: Update buffer and packet counters
+        st.session_state.packet_buffer.append(packet_data.to_dict())
+        st.session_state.total_packets_processed += 1
         
-        # Step B: Calculate Threat Severity
-        sev = compute_severity(row, st.session_state.buffer)
-        st.session_state.history.append(sev)
-        if len(st.session_state.history) > 30:
-            st.session_state.history.pop(0)
+        # Step 2: Compute threat score
+        current_severity = calculate_threat_severity(packet_data, st.session_state.packet_buffer)
+        st.session_state.threat_history.append(current_severity)
+        
+        # Keep chart history limited to the last 30 readings
+        if len(st.session_state.threat_history) > 30:
+            st.session_state.threat_history.pop(0)
 
-        # Step C: Update Ingestion Feed Panel
-        with feed_placeholder.container():
-            st.write(f"**Current Buffer Depth:** `{len(st.session_state.buffer)}/9`")
-            st.write(f"**Port:** `{row.get('Destination Port', 'N/A')}` | **Duration:** `{row.get('Flow Duration', 'N/A')} µs`")
-            st.write(f"**Fwd Pkts:** `{row.get('Total Fwd Packets', 'N/A')}` | **Bwd Pkts:** `{row.get('Total Backward Packets', 'N/A')}`")
-            label = row.get('Label', 'BENIGN')
-            if 'DDoS' in str(label):
-                st.markdown(f"**Ground Truth:** :red[{label}]")
-            else:
-                st.markdown(f"**Ground Truth:** :green[{label}]")
+        # Count detected threats
+        if current_severity >= 7:
+            st.session_state.total_threats_detected += 1
 
-        # Step D: Update Live Line Chart
-        chart_placeholder.line_chart(st.session_state.history)
+        # Update sidebar metrics live
+        stat_total_packets.metric(label="Total Packets Processed", value=st.session_state.total_packets_processed)
+        stat_total_threats.metric(label="DDoS Spikes Blocked", value=st.session_state.total_threats_detected)
 
-        # Step E: Trigger Quarantine & Mitigation if Severity >= 7
-        if sev >= 7:
-            status_placeholder.error(f"🚨 CRITICAL ANOMALY (Severity {sev}/10)")
-            status_placeholder.write("**XAI Root Cause:** Low-density state. High forward packet asymmetry.")
+        # Step 3: Render Ingestion Feed Card
+        with feed_display.container():
+            st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
             
-            # Simulated terminal quarantine execution
-            mitigation_cmd = f"netsh advfirewall firewall add rule name=\"Block_Attacker\" dir=in action=block remoteip=192.168.10.{idx%255}"
-            terminal_placeholder.code(f"$ {mitigation_cmd}\n[SUCCESS] Attacker IP quarantined in O(1) time.", language="bash")
-        else:
-            status_placeholder.success(f" Normal Traffic (Severity {sev}/10)")
-            terminal_placeholder.info("System healthy. Monitoring 9-packet buffer window...")
+            # Show buffer filling up
+            buffer_depth = len(st.session_state.packet_buffer)
+            st.write(f"**Sliding Window Buffer:** `{buffer_depth}/9 Packets`")
+            st.progress(buffer_depth / 9.0)
+            
+            # Extract packet fields
+            dest_port = packet_data.get('Destination Port', 'N/A')
+            flow_duration = packet_data.get('Flow Duration', 'N/A')
+            fwd_pkts = packet_data.get('Total Fwd Packets', 'N/A')
+            bwd_pkts = packet_data.get('Total Backward Packets', 'N/A')
+            ground_truth = str(packet_data.get('Label', 'BENIGN'))
 
-        # Step F: Speed bumper
-        time.sleep(0.3)
+            st.write(f"**Destination Port:** `{dest_port}`")
+            st.write(f"**Flow Duration:** `{flow_duration} µs`")
+            st.write(f"**Forward Packets:** `{fwd_pkts}` | **Backward Packets:** `{bwd_pkts}`")
+            
+            if "DDoS" in ground_truth:
+                st.markdown(f"**Ground Truth Label:** 🚨 <span style='color:#f87171; font-weight:bold;'>{ground_truth}</span>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"**Ground Truth Label:** ✅ <span style='color:#4ade80; font-weight:bold;'>{ground_truth}</span>", unsafe_allow_html=True)
+                
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Step 4: Render Live Threat Line Chart
+        chart_display.line_chart(st.session_state.threat_history)
+
+        # Step 5: Render Action & Mitigation Card
+        if current_severity >= 7:
+            with status_display.container():
+                st.markdown(f"""
+                    <div class='status-box-attack'>
+                        <h3>🚨 CRITICAL ANOMALY DETECTED</h3>
+                        <p><b>Severity Score:</b> {current_severity}/10</p>
+                        <p><b>Root Cause:</b> Packet asymmetry threshold exceeded. High forward request burst detected.</p>
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            # Simulated Firewall IP Block Command
+            simulated_ip = f"192.168.10.{(packet_index % 250) + 1}"
+            command_text = f"netsh advfirewall firewall add rule name=\"Block_Attacker_{packet_index}\" dir=in action=block remoteip={simulated_ip}"
+            
+            terminal_display.code(
+                f"$ {command_text}\n[SUCCESS] Threat source {simulated_ip} quarantined in O(1) time.", 
+                language="bash"
+            )
+        else:
+            with status_display.container():
+                st.markdown(f"""
+                    <div class='status-box-normal'>
+                        <h3>✅ SYSTEM HEALTHY</h3>
+                        <p><b>Severity Score:</b> {current_severity}/10</p>
+                        <p><b>Status:</b> Traffic within normal parameters.</p>
+                    </div>
+                """, unsafe_allow_html=True)
+            
+            terminal_display.info("Active Monitoring: 9-packet buffer evaluating incoming traffic streams...")
+
+        # Step 6: Delay loop iteration
+        time.sleep(simulation_speed)
