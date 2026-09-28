@@ -14,14 +14,15 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS styling with ANIMATED BACKGROUND and Frosted Glass Cards
+# Custom CSS styling with LIGHT ANIMATED BACKGROUND and Soft Frosted Glass Cards
 st.markdown("""
     <style>
-    /* 1. The Soothing Animated Background */
+    /* 1. The Soothing Light Animated Background */
     .stApp {
-        background: linear-gradient(-45deg, #0f172a, #172554, #064e3b, #1e1b4b);
+        background: linear-gradient(-45deg, #f0f9ff, #e0f2fe, #ccfbf1, #f8fafc);
         background-size: 400% 400%;
         animation: gradientBG 15s ease infinite;
+        color: #0f172a; /* Dark default text */
     }
 
     @keyframes gradientBG {
@@ -30,35 +31,45 @@ st.markdown("""
         100% { background-position: 0% 50%; }
     }
 
-    /* Make Streamlit's default top header transparent so it doesn't block the animation */
+    /* Make Streamlit's default top header transparent */
     header {
         background: transparent !important;
     }
 
-    /* 2. Frosted Glass Effect (Glassmorphism) for the cards */
+    /* 2. Light Frosted Glass Effect (Glassmorphism) */
     .metric-card {
-        background-color: rgba(30, 41, 59, 0.75); /* Semi-transparent */
-        backdrop-filter: blur(10px); /* Blurs the moving background behind it */
+        background-color: rgba(255, 255, 255, 0.65); /* Semi-transparent white */
+        backdrop-filter: blur(10px);
         padding: 15px;
         border-radius: 10px;
         border-left: 5px solid #3b82f6;
         margin-bottom: 10px;
+        color: #1e293b;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05); /* Soft shadow for depth */
     }
     .status-box-normal {
-        background-color: rgba(6, 78, 59, 0.75);
+        background-color: rgba(209, 250, 229, 0.75); /* Soft mint */
         backdrop-filter: blur(10px);
-        color: #6ee7b7;
+        color: #065f46; /* Dark green text */
         padding: 15px;
         border-radius: 8px;
-        border: 1px solid #059669;
+        border: 1px solid #34d399;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
     }
     .status-box-attack {
-        background-color: rgba(136, 19, 55, 0.85);
+        background-color: rgba(254, 226, 226, 0.85); /* Soft pink/red */
         backdrop-filter: blur(10px);
-        color: #fca5a5;
+        color: #9f1239; /* Dark red text */
         padding: 15px;
         border-radius: 8px;
-        border: 1px solid #e11d48;
+        border: 1px solid #fb7185;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+    }
+    
+    /* Ensure all markdown headings in the cards stay dark */
+    .metric-card h3, .status-box-attack h3, .status-box-normal h3 {
+        color: inherit;
+        margin-top: 0;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -71,16 +82,13 @@ st.write("---")
 # ==========================================
 # 2. DATA LOADING FUNCTION
 # ==========================================
-# We load our lightweight network dataset into memory
 dataset_path = "sample_traffic.csv"
 
 @st.cache_data
 def load_network_dataset():
-    # Check if our sample file exists in the folder
     if os.path.exists(dataset_path):
         data_frame = pd.read_csv(dataset_path)
     else:
-        # Fallback dummy data if sample_traffic.csv is missing
         backup_data = {
             'Destination Port': [80, 443, 80, 80, 80, 80, 443, 80],
             'Flow Duration': [12000, 8500, 3400, 500, 300, 250, 15000, 9200],
@@ -90,7 +98,6 @@ def load_network_dataset():
         }
         data_frame = pd.DataFrame(backup_data)
     
-    # Strip extra spaces from column headers
     cleaned_columns = []
     for column_name in data_frame.columns:
         cleaned_columns.append(column_name.strip())
@@ -98,13 +105,11 @@ def load_network_dataset():
     
     return data_frame
 
-# Load the dataset
 network_data = load_network_dataset()
 
 # ==========================================
 # 3. INITIALIZE SESSION STATE
 # ==========================================
-# Session state stores our ring buffer and history so Streamlit doesn't reset them
 if 'packet_buffer' not in st.session_state:
     st.session_state.packet_buffer = deque(maxlen=9)
 
@@ -121,11 +126,6 @@ if 'total_threats_detected' not in st.session_state:
 # 4. SEVERITY MATH CALCULATION
 # ==========================================
 def calculate_threat_severity(packet_row, current_buffer):
-    """
-    Calculates a severity score from 1 to 10 based on packet asymmetry 
-    and flow duration.
-    """
-    # Extract feature values safely with default fallbacks
     if 'Total Fwd Packets' in packet_row:
         forward_packets = float(packet_row['Total Fwd Packets'])
     else:
@@ -141,21 +141,15 @@ def calculate_threat_severity(packet_row, current_buffer):
     else:
         duration_time = 1.0
 
-    # Calculate packet ratio (forward vs backward)
-    # High forward packets with zero or low backward packets indicates a flood attack
     packet_ratio = forward_packets / (backward_packets + 1.0)
 
-    # Determine base threat score
     if packet_ratio > 10.0 or duration_time < 500:
-        # High likelihood of attack
         random_spike = np.random.uniform(0.1, 1.4)
         calculated_score = 8.5 + random_spike
     else:
-        # Normal traffic pattern
         random_variation = np.random.uniform(0.1, 1.2)
         calculated_score = 1.5 + random_variation
 
-    # Round the final score and clip it between 1 and 10
     rounded_score = int(round(calculated_score))
     
     if rounded_score > 10:
@@ -206,44 +200,35 @@ with column_action:
 # 7. MAIN SIMULATION LOOP
 # ==========================================
 if start_button:
-    # Reset history on new run
     st.session_state.threat_history = []
     st.session_state.total_packets_processed = 0
     st.session_state.total_threats_detected = 0
 
-    # Iterate row by row through the network dataset
     for packet_index, packet_data in network_data.iterrows():
         
-        # Step 1: Update buffer and packet counters
         st.session_state.packet_buffer.append(packet_data.to_dict())
         st.session_state.total_packets_processed += 1
         
-        # Step 2: Compute threat score
         current_severity = calculate_threat_severity(packet_data, st.session_state.packet_buffer)
         st.session_state.threat_history.append(current_severity)
         
-        # Keep chart history limited to the last 30 readings
         if len(st.session_state.threat_history) > 30:
             st.session_state.threat_history.pop(0)
 
-        # Count detected threats
         if current_severity >= 7:
             st.session_state.total_threats_detected += 1
 
-        # Update sidebar metrics live
         stat_total_packets.metric(label="Total Packets Processed", value=st.session_state.total_packets_processed)
         stat_total_threats.metric(label="DDoS Spikes Blocked", value=st.session_state.total_threats_detected)
 
-        # Step 3: Render Ingestion Feed Card
+        # Render Ingestion Feed Card
         with feed_display.container():
             st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
             
-            # Show buffer filling up
             buffer_depth = len(st.session_state.packet_buffer)
             st.write(f"**Sliding Window Buffer:** `{buffer_depth}/9 Packets`")
             st.progress(buffer_depth / 9.0)
             
-            # Extract packet fields
             dest_port = packet_data.get('Destination Port', 'N/A')
             flow_duration = packet_data.get('Flow Duration', 'N/A')
             fwd_pkts = packet_data.get('Total Fwd Packets', 'N/A')
@@ -254,17 +239,18 @@ if start_button:
             st.write(f"**Flow Duration:** `{flow_duration} µs`")
             st.write(f"**Forward Packets:** `{fwd_pkts}` | **Backward Packets:** `{bwd_pkts}`")
             
+            # Using darker text colors so it's readable on the light background
             if "DDoS" in ground_truth:
-                st.markdown(f"**Ground Truth Label:** 🚨 <span style='color:#f87171; font-weight:bold;'>{ground_truth}</span>", unsafe_allow_html=True)
+                st.markdown(f"**Ground Truth Label:** 🚨 <span style='color:#dc2626; font-weight:bold;'>{ground_truth}</span>", unsafe_allow_html=True)
             else:
-                st.markdown(f"**Ground Truth Label:** ✅ <span style='color:#4ade80; font-weight:bold;'>{ground_truth}</span>", unsafe_allow_html=True)
+                st.markdown(f"**Ground Truth Label:** ✅ <span style='color:#16a34a; font-weight:bold;'>{ground_truth}</span>", unsafe_allow_html=True)
                 
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # Step 4: Render Live Threat Line Chart
+        # Render Live Threat Line Chart
         chart_display.line_chart(st.session_state.threat_history)
 
-        # Step 5: Render Action & Mitigation Card
+        # Render Action & Mitigation Card
         if current_severity >= 7:
             with status_display.container():
                 st.markdown(f"""
@@ -275,7 +261,6 @@ if start_button:
                     </div>
                 """, unsafe_allow_html=True)
             
-            # Simulated Firewall IP Block Command
             simulated_ip = f"192.168.10.{(packet_index % 250) + 1}"
             command_text = f"netsh advfirewall firewall add rule name=\"Block_Attacker_{packet_index}\" dir=in action=block remoteip={simulated_ip}"
             
@@ -295,5 +280,4 @@ if start_button:
             
             terminal_display.info("Active Monitoring: 9-packet buffer evaluating incoming traffic streams...")
 
-        # Step 6: Delay loop iteration
         time.sleep(simulation_speed)
