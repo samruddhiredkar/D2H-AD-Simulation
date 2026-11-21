@@ -253,22 +253,18 @@ def build_continuous_stream_tick(step, base_payload):
 def apply_remote_payload(payload):
     if not isinstance(payload, dict):
         return
-    latest = payload.get("latest") or {}
-    seed_pkts = int(payload.get("total_pkts", 0))
-    seed_threats = int(payload.get("total_threats", 0))
-    remote_hist = payload.get("history")
 
     with live_state["lock"]:
         if not live_state["seeded"]:
             live_state["seeded"] = True
-            live_state["total_pkts"] = max(live_state["total_pkts"], seed_pkts)
-            live_state["total_threats"] = max(live_state["total_threats"], seed_threats)
-            if isinstance(remote_hist, list) and len(remote_hist) > 0:
-                live_state["history"] = [clamp_severity(float(x)) for x in remote_hist[-30:]]
+            live_state["total_pkts"] = 0
+            live_state["total_threats"] = 0
+            live_state["history"] = [1, 1]
 
         live_state["step"] += 1
         pkt_inc, sev, meta = build_continuous_stream_tick(live_state["step"], payload)
-        live_state["total_pkts"] += pkt_inc
+        # Start cleanly at 1 on the very first tick, then stream continuously
+        live_state["total_pkts"] = 1 if live_state["step"] == 1 else (live_state["total_pkts"] + pkt_inc)
         if sev >= 7:
             live_state["total_threats"] += 1
         live_state["latest_meta"] = meta
