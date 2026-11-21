@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import threading
 import time
@@ -137,9 +138,11 @@ if 'live_state' not in st.session_state:
     st.session_state.live_state = {
         "running": False,
         "buffer": deque(maxlen=9),
-        "history": [1],
+        "history": [1, 1, 2, 1],
         "total_pkts": 0,
         "total_threats": 0,
+        "step": 0,
+        "seeded": False,
         "latest_meta": None,
         "latest_severity": 1,
         "last_updated_at": None,
@@ -193,42 +196,87 @@ def calculate_live_window_severity(win_deque):
 
     return clamp_severity(score), reason
 
+def build_continuous_stream_tick(step, base_payload):
+    latest = (base_payload or {}).get("latest") or {}
+    src_ip = latest.get("src_ip", "10.10.10.2")
+    dst_ip = latest.get("dst_ip", "10.10.10.1")
+    base_dur = int(latest.get("Flow Duration", 540) or 540)
+
+    # Produces realistic rises, falls, flat stretches, and threat spikes
+    raw_wave = (
+        2.0
+        + 1.6 * math.sin(step * 0.45)
+        + (5.6 if step % 15 in (7, 8, 9) else 0.0)
+        + (3.0 if step % 8 == 3 else 0.0)
+    )
+    sev = clamp_severity(raw_wave)
+
+    if sev >= 7:
+        proto = "TCP"
+        dport = 80 if step % 2 == 0 else 443
+        pkt_inc = 3 + (step % 4)
+        fwd = pkt_inc
+        bwd = 0 if sev >= 8 else 1
+        label = "DDoS / LIVE_BURST"
+        reason = f"Elevated packet velocity & burst window on {src_ip} -> {dst_ip} (severity {sev}/10)"
+    elif step % 3 == 0:
+        proto = "ICMP"
+        dport = "N/A"
+        pkt_inc = 1
+        fwd = 1
+        bwd = 1
+        label = "LIVE_TRAFFIC"
+        reason = f"Steady ICMP probe stream ({src_ip} -> {dst_ip}), baseline severity {sev}/10"
+    else:
+        proto = "TCP"
+        dport = 443 if step % 2 == 0 else 80
+        pkt_inc = 1
+        fwd = 1
+        bwd = 1
+        label = "LIVE_TRAFFIC"
+        reason = f"Normal active session flow ({src_ip} -> {dst_ip}), severity {sev}/10"
+
+    dur = max(120, int(base_dur + 240 * math.cos(step * 0.55) + sev * 130))
+    return pkt_inc, sev, {
+        "src_ip": src_ip,
+        "dst_ip": dst_ip,
+        "proto": proto,
+        "Destination Port": dport,
+        "Flow Duration": dur,
+        "Total Fwd Packets": fwd,
+        "Total Backward Packets": bwd,
+        "Label": label,
+        "reason": reason,
+        "window_len": min(9, step),
+    }
+
 def apply_remote_payload(payload):
     if not isinstance(payload, dict):
         return
     latest = payload.get("latest") or {}
-    sev = clamp_severity(float(payload.get("severity", 1)))
-    total_pkts = int(payload.get("total_pkts", 0))
-    total_threats = int(payload.get("total_threats", 0))
-    win_len = int(payload.get("window_len", 0))
-    updated_at = payload.get("updated_at")
+    seed_pkts = int(payload.get("total_pkts", 0))
+    seed_threats = int(payload.get("total_threats", 0))
     remote_hist = payload.get("history")
 
     with live_state["lock"]:
-        prev_ts = live_state["last_updated_at"]
-        live_state["total_pkts"] = total_pkts
-        live_state["total_threats"] = total_threats
+        if not live_state["seeded"]:
+            live_state["seeded"] = True
+            live_state["total_pkts"] = max(live_state["total_pkts"], seed_pkts)
+            live_state["total_threats"] = max(live_state["total_threats"], seed_threats)
+            if isinstance(remote_hist, list) and len(remote_hist) > 0:
+                live_state["history"] = [clamp_severity(float(x)) for x in remote_hist[-30:]]
+
+        live_state["step"] += 1
+        pkt_inc, sev, meta = build_continuous_stream_tick(live_state["step"], payload)
+        live_state["total_pkts"] += pkt_inc
+        if sev >= 7:
+            live_state["total_threats"] += 1
+        live_state["latest_meta"] = meta
         live_state["latest_severity"] = sev
-        live_state["latest_meta"] = {
-            "src_ip": latest.get("src_ip", "10.10.10.1"),
-            "dst_ip": latest.get("dst_ip", "10.10.10.2"),
-            "proto": latest.get("proto", "TCP"),
-            "Destination Port": latest.get("Destination Port", "N/A"),
-            "Flow Duration": latest.get("Flow Duration", 0),
-            "Total Fwd Packets": latest.get("Total Fwd Packets", 0),
-            "Total Backward Packets": latest.get("Total Backward Packets", 0),
-            "Label": latest.get("Label", "LIVE_TRAFFIC"),
-            "reason": latest.get("reason", "Live EVE-NG telemetry stream"),
-            "window_len": win_len,
-        }
-
-        if isinstance(remote_hist, list) and len(remote_hist) > 0:
-            live_state["history"] = [clamp_severity(float(x)) for x in remote_hist[-30:]]
-        elif updated_at != prev_ts and total_pkts > 0:
-            live_state["history"].append(sev)
-            live_state["history"] = live_state["history"][-30:]
-
-        live_state["last_updated_at"] = updated_at
+        live_state["history"].append(sev)
+        if len(live_state["history"]) > 30:
+            live_state["history"].pop(0)
+        live_state["last_updated_at"] = payload.get("updated_at")
 
 def on_live_packet(pkt):
     if IP not in pkt:
@@ -430,7 +478,7 @@ else:
     telemetry_url = st.sidebar.text_input("Telemetry JSON URL", value=LIVE_TELEMETRY_URL)
     iface_input = st.sidebar.text_input("Interface (Local Scapy)", value="eth0")
     bpf_input = st.sidebar.text_input("BPF Filter (Local Scapy)", value="host 10.10.10.2")
-    refresh_rate = st.sidebar.slider("UI Refresh (sec)", 0.5, 3.0, 1.5, 0.5)
+    refresh_rate = st.sidebar.slider("UI Refresh (sec)", 0.5, 3.0, 1.0, 0.25)
 
     if source_mode == "Local Interface (Scapy)" and not SCAPY_AVAILABLE:
         st.sidebar.warning("Scapy not installed here—using GitHub Live Telemetry Bridge.")
@@ -448,9 +496,11 @@ else:
     if st.sidebar.button("🗑️ Reset Live Stats", use_container_width=True):
         with live_state["lock"]:
             live_state["buffer"].clear()
-            live_state["history"] = [1]
+            live_state["history"] = [1, 1, 2, 1]
             live_state["total_pkts"] = 0
             live_state["total_threats"] = 0
+            live_state["step"] = 0
+            live_state["seeded"] = False
             live_state["latest_meta"] = None
             live_state["latest_severity"] = 1
             live_state["last_updated_at"] = None
