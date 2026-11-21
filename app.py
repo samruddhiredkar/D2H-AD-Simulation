@@ -1,6 +1,8 @@
+import json
 import os
-import time
 import threading
+import time
+import urllib.request
 from collections import deque
 import numpy as np
 import pandas as pd
@@ -81,9 +83,10 @@ st.markdown("### Real-Time Telemetry & Threat Severity Monitoring (Phase 1 CSV +
 st.write("---")
 
 # ==========================================
-# 2. DATA LOADING FUNCTION (PHASE 1)
+# 2. DATA LOADING FUNCTION (PHASE 1 & 2 BRIDGE)
 # ==========================================
 dataset_path = "sample_traffic.csv"
+LIVE_TELEMETRY_URL = "https://raw.githubusercontent.com/anjaliib12/D2H-AD-Simulation/main/live_telemetry.json"
 
 @st.cache_data
 def load_network_dataset():
@@ -101,6 +104,17 @@ def load_network_dataset():
 
     data_frame.columns = [column_name.strip() for column_name in data_frame.columns]
     return data_frame
+
+def fetch_remote_telemetry(url=LIVE_TELEMETRY_URL):
+    if os.path.exists("live_telemetry.json"):
+        with open("live_telemetry.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    req = urllib.request.Request(
+        f"{url}?t={int(time.time() * 1000)}",
+        headers={"Cache-Control": "no-cache"}
+    )
+    with urllib.request.urlopen(req, timeout=4) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 network_data = load_network_dataset()
 
@@ -123,11 +137,12 @@ if 'live_state' not in st.session_state:
     st.session_state.live_state = {
         "running": False,
         "buffer": deque(maxlen=9),
-        "history": [],
+        "history": [1],
         "total_pkts": 0,
         "total_threats": 0,
         "latest_meta": None,
         "latest_severity": 1,
+        "last_updated_at": None,
         "lock": threading.Lock(),
     }
 
@@ -178,6 +193,43 @@ def calculate_live_window_severity(win_deque):
 
     return clamp_severity(score), reason
 
+def apply_remote_payload(payload):
+    if not isinstance(payload, dict):
+        return
+    latest = payload.get("latest") or {}
+    sev = clamp_severity(float(payload.get("severity", 1)))
+    total_pkts = int(payload.get("total_pkts", 0))
+    total_threats = int(payload.get("total_threats", 0))
+    win_len = int(payload.get("window_len", 0))
+    updated_at = payload.get("updated_at")
+    remote_hist = payload.get("history")
+
+    with live_state["lock"]:
+        prev_ts = live_state["last_updated_at"]
+        live_state["total_pkts"] = total_pkts
+        live_state["total_threats"] = total_threats
+        live_state["latest_severity"] = sev
+        live_state["latest_meta"] = {
+            "src_ip": latest.get("src_ip", "10.10.10.1"),
+            "dst_ip": latest.get("dst_ip", "10.10.10.2"),
+            "proto": latest.get("proto", "TCP"),
+            "Destination Port": latest.get("Destination Port", "N/A"),
+            "Flow Duration": latest.get("Flow Duration", 0),
+            "Total Fwd Packets": latest.get("Total Fwd Packets", 0),
+            "Total Backward Packets": latest.get("Total Backward Packets", 0),
+            "Label": latest.get("Label", "LIVE_TRAFFIC"),
+            "reason": latest.get("reason", "Live EVE-NG telemetry stream"),
+            "window_len": win_len,
+        }
+
+        if isinstance(remote_hist, list) and len(remote_hist) > 0:
+            live_state["history"] = [clamp_severity(float(x)) for x in remote_hist[-30:]]
+        elif updated_at != prev_ts and total_pkts > 0:
+            live_state["history"].append(sev)
+            live_state["history"] = live_state["history"][-30:]
+
+        live_state["last_updated_at"] = updated_at
+
 def on_live_packet(pkt):
     if IP not in pkt:
         return
@@ -214,6 +266,7 @@ def on_live_packet(pkt):
         "ts": now,
         "is_syn": is_syn,
         "Label": "LIVE_TRAFFIC",
+        "window_len": None,
     }
 
     with live_state["lock"]:
@@ -221,6 +274,7 @@ def on_live_packet(pkt):
         live_state["buffer"].append(meta)
         sev, reason = calculate_live_window_severity(live_state["buffer"])
         meta["reason"] = reason
+        meta["window_len"] = len(live_state["buffer"])
         live_state["latest_meta"] = meta
         live_state["latest_severity"] = sev
         live_state["history"].append(sev)
@@ -268,7 +322,8 @@ def render_dashboard_cards(feed_placeholder, chart_placeholder, status_placehold
             st.markdown(f"**Ground Truth / Status:** ✅ <span style='color:#16a34a; font-weight:bold;'>{label_text}</span>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    chart_placeholder.line_chart(history_list if history_list else [1])
+    chart_df = pd.DataFrame({"Threat Score (1-10)": history_list if len(history_list) >= 2 else [1, severity if history_list else 1]})
+    chart_placeholder.line_chart(chart_df, height=260)
 
     if severity >= 7:
         root_cause = reason_text or "Packet asymmetry threshold exceeded. High forward request burst detected."
@@ -364,22 +419,28 @@ if mode == "Phase 1: CSV / Replay Simulation":
             time.sleep(simulation_speed)
 
 # ==========================================
-# 6B. PHASE 2 WORKFLOW (LIVE SCAPY CAPTURE)
+# 6B. PHASE 2 WORKFLOW (LIVE BRIDGE + SCAPY)
 # ==========================================
 else:
     st.sidebar.subheader("Live EVE-NG Capture")
-    if not SCAPY_AVAILABLE:
-        st.sidebar.error("Scapy not installed. Run: pip install scapy")
+    source_mode = st.sidebar.radio(
+        "Live Capture Source:",
+        ["GitHub Live Telemetry Bridge", "Local Interface (Scapy)"]
+    )
+    telemetry_url = st.sidebar.text_input("Telemetry JSON URL", value=LIVE_TELEMETRY_URL)
+    iface_input = st.sidebar.text_input("Interface (Local Scapy)", value="eth0")
+    bpf_input = st.sidebar.text_input("BPF Filter (Local Scapy)", value="host 10.10.10.2")
+    refresh_rate = st.sidebar.slider("UI Refresh (sec)", 0.5, 3.0, 1.5, 0.5)
 
-    iface_input = st.sidebar.text_input("Interface", value="eth0")
-    bpf_input = st.sidebar.text_input("BPF Filter", value="host 10.10.10.2")
-    refresh_rate = st.sidebar.slider("UI Refresh (sec)", 0.5, 2.5, 1.0, 0.5)
+    if source_mode == "Local Interface (Scapy)" and not SCAPY_AVAILABLE:
+        st.sidebar.warning("Scapy not installed here—using GitHub Live Telemetry Bridge.")
 
     c_start, c_stop = st.sidebar.columns(2)
-    if c_start.button("▶️ Start Live", use_container_width=True, disabled=not SCAPY_AVAILABLE):
+    if c_start.button("▶️ Start Live", use_container_width=True):
         if not live_state["running"]:
             live_state["running"] = True
-            threading.Thread(target=live_sniffer_thread, args=(iface_input, bpf_input), daemon=True).start()
+            if source_mode == "Local Interface (Scapy)" and SCAPY_AVAILABLE:
+                threading.Thread(target=live_sniffer_thread, args=(iface_input, bpf_input), daemon=True).start()
 
     if c_stop.button("⏹️ Stop", use_container_width=True):
         live_state["running"] = False
@@ -387,16 +448,27 @@ else:
     if st.sidebar.button("🗑️ Reset Live Stats", use_container_width=True):
         with live_state["lock"]:
             live_state["buffer"].clear()
-            live_state["history"].clear()
+            live_state["history"] = [1]
             live_state["total_pkts"] = 0
             live_state["total_threats"] = 0
             live_state["latest_meta"] = None
             live_state["latest_severity"] = 1
+            live_state["last_updated_at"] = None
+
+    if live_state["running"] and (source_mode == "GitHub Live Telemetry Bridge" or not SCAPY_AVAILABLE):
+        try:
+            payload = fetch_remote_telemetry(telemetry_url)
+            apply_remote_payload(payload)
+        except Exception as exc:
+            st.sidebar.caption(f"Bridge sync note: {exc}")
 
     with live_state["lock"]:
         l_pkts = live_state["total_pkts"]
         l_threats = live_state["total_threats"]
-        l_buf_len = len(live_state["buffer"])
+        l_buf_len = (
+            live_state["latest_meta"].get("window_len", len(live_state["buffer"]))
+            if live_state["latest_meta"] else len(live_state["buffer"])
+        )
         l_hist = list(live_state["history"])
         l_meta = dict(live_state["latest_meta"]) if live_state["latest_meta"] else None
         l_sev = live_state["latest_severity"]
@@ -411,7 +483,7 @@ else:
             chart_display,
             status_display,
             terminal_display,
-            buf_len=l_buf_len,
+            buf_len=min(9, int(l_buf_len or 0)),
             dport=l_meta["Destination Port"],
             duration=l_meta["Flow Duration"],
             fwd=l_meta["Total Fwd Packets"],
@@ -436,8 +508,8 @@ else:
             bwd=0,
             label_text="IDLE / WAITING FOR PACKETS",
             severity=1,
-            history_list=[1],
-            reason_text="Click Start Live and send ping/nmap traffic between 10.10.10.1 and 10.10.10.2.",
+            history_list=[1, 1],
+            reason_text="Click Start Live and run traffic in the EVE-NG lab (10.10.10.1 ↔ 10.10.10.2).",
         )
 
     if l_running:
