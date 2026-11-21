@@ -1,0 +1,19 @@
+{
+  "updated_at": 0,
+  "total_pkts": 0,
+  "total_threats": 0,
+  "window_len": 0,
+  "severity": 1,
+  "history": [1],
+  "latest": {
+    "src_ip": "10.10.10.1",
+    "dst_ip": "10.10.10.2",
+    "proto": "ICMP",
+    "Destination Port": "N/A",
+    "Flow Duration": 100,
+    "Total Fwd Packets": 1,
+    "Total Backward Packets": 1,
+    "Label": "READY",
+    "reason": "Waiting for EVE-NG lab telemetry..."
+  }
+}
