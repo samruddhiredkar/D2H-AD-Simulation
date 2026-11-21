@@ -1,19 +1,12 @@
 import json
 import math
 import os
-import threading
 import time
 import urllib.request
 from collections import deque
 import numpy as np
 import pandas as pd
 import streamlit as st
-
-try:
-    from scapy.all import sniff, IP, TCP, UDP, ICMP
-    SCAPY_AVAILABLE = True
-except ImportError:
-    SCAPY_AVAILABLE = False
 
 # ==========================================
 # 1. PAGE SETUP & STYLING
@@ -137,7 +130,6 @@ if 'total_threats_detected' not in st.session_state:
 if 'live_state' not in st.session_state:
     st.session_state.live_state = {
         "running": False,
-        "buffer": deque(maxlen=9),
         "history": [1, 1, 2, 1],
         "total_pkts": 0,
         "total_threats": 0,
@@ -146,7 +138,6 @@ if 'live_state' not in st.session_state:
         "latest_meta": None,
         "latest_severity": 1,
         "last_updated_at": None,
-        "lock": threading.Lock(),
     }
 
 live_state = st.session_state.live_state
@@ -174,35 +165,12 @@ def calculate_threat_severity(packet_row, current_buffer):
 
     return clamp_severity(calculated_score)
 
-def calculate_live_window_severity(win_deque):
-    if len(win_deque) < 2:
-        return 1, "Warming up 9-packet window..."
-
-    ts_arr = np.array([p["ts"] for p in win_deque], dtype=np.float64)
-    dt = max(float(ts_arr[-1] - ts_arr[0]), 1e-3)
-    pkt_rate = (len(win_deque) - 1) / dt
-    syn_burst = sum(1 for p in win_deque if p.get("is_syn", False))
-    avg_len = float(np.mean([p["len"] for p in win_deque]))
-
-    if syn_burst >= 6 or pkt_rate > 25.0:
-        score = 8.5 + min(1.5, pkt_rate / 40.0)
-        reason = f"High-rate burst / SYN spike ({pkt_rate:.1f} pkt/s, SYNs={syn_burst}/9)"
-    elif pkt_rate > 12.0 or avg_len > 1100:
-        score = 7.0 + min(2.0, pkt_rate / 25.0)
-        reason = f"Elevated traffic velocity ({pkt_rate:.1f} pkt/s, avg {avg_len:.0f} B)"
-    else:
-        score = 1.5 + min(3.0, pkt_rate / 6.0)
-        reason = f"Traffic within normal range ({pkt_rate:.1f} pkt/s)"
-
-    return clamp_severity(score), reason
-
 def build_continuous_stream_tick(step, base_payload):
     latest = (base_payload or {}).get("latest") or {}
     src_ip = latest.get("src_ip", "10.10.10.2")
     dst_ip = latest.get("dst_ip", "10.10.10.1")
     base_dur = int(latest.get("Flow Duration", 540) or 540)
 
-    # Produces realistic rises, falls, flat stretches, and threat spikes
     raw_wave = (
         2.0
         + 1.6 * math.sin(step * 0.45)
@@ -254,87 +222,23 @@ def apply_remote_payload(payload):
     if not isinstance(payload, dict):
         return
 
-    with live_state["lock"]:
-        if not live_state["seeded"]:
-            live_state["seeded"] = True
-            live_state["total_pkts"] = 0
-            live_state["total_threats"] = 0
-            live_state["history"] = [1, 1]
+    if not live_state["seeded"]:
+        live_state["seeded"] = True
+        live_state["total_pkts"] = 0
+        live_state["total_threats"] = 0
+        live_state["history"] = [1, 1]
 
-        live_state["step"] += 1
-        pkt_inc, sev, meta = build_continuous_stream_tick(live_state["step"], payload)
-        # Start cleanly at 1 on the very first tick, then stream continuously
-        live_state["total_pkts"] = 1 if live_state["step"] == 1 else (live_state["total_pkts"] + pkt_inc)
-        if sev >= 7:
-            live_state["total_threats"] += 1
-        live_state["latest_meta"] = meta
-        live_state["latest_severity"] = sev
-        live_state["history"].append(sev)
-        if len(live_state["history"]) > 30:
-            live_state["history"].pop(0)
-        live_state["last_updated_at"] = payload.get("updated_at")
-
-def on_live_packet(pkt):
-    if IP not in pkt:
-        return
-
-    now = time.time()
-    src_ip = pkt[IP].src
-    dst_ip = pkt[IP].dst
-    pkt_len = len(pkt)
-    dport = "N/A"
-    proto = "IP"
-    is_syn = False
-
-    if TCP in pkt:
-        proto = "TCP"
-        dport = pkt[TCP].dport
-        flags_str = str(pkt[TCP].flags)
-        is_syn = ("S" in flags_str and "A" not in flags_str)
-    elif UDP in pkt:
-        proto = "UDP"
-        dport = pkt[UDP].dport
-    elif ICMP in pkt:
-        proto = "ICMP"
-        dport = f"ICMP-{pkt[ICMP].type}"
-
-    meta = {
-        "src_ip": src_ip,
-        "dst_ip": dst_ip,
-        "proto": proto,
-        "Destination Port": dport,
-        "Flow Duration": int(pkt_len * 10),
-        "Total Fwd Packets": 1,
-        "Total Backward Packets": 0,
-        "len": pkt_len,
-        "ts": now,
-        "is_syn": is_syn,
-        "Label": "LIVE_TRAFFIC",
-        "window_len": None,
-    }
-
-    with live_state["lock"]:
-        live_state["total_pkts"] += 1
-        live_state["buffer"].append(meta)
-        sev, reason = calculate_live_window_severity(live_state["buffer"])
-        meta["reason"] = reason
-        meta["window_len"] = len(live_state["buffer"])
-        live_state["latest_meta"] = meta
-        live_state["latest_severity"] = sev
-        live_state["history"].append(sev)
-        if len(live_state["history"]) > 30:
-            live_state["history"].pop(0)
-        if sev >= 7:
-            live_state["total_threats"] += 1
-
-def live_sniffer_thread(iface_name, bpf):
-    sniff(
-        iface=iface_name,
-        filter=bpf if bpf.strip() else None,
-        prn=on_live_packet,
-        store=False,
-        stop_filter=lambda _: not live_state["running"],
-    )
+    live_state["step"] += 1
+    pkt_inc, sev, meta = build_continuous_stream_tick(live_state["step"], payload)
+    live_state["total_pkts"] = 1 if live_state["step"] == 1 else (live_state["total_pkts"] + pkt_inc)
+    if sev >= 7:
+        live_state["total_threats"] += 1
+    live_state["latest_meta"] = meta
+    live_state["latest_severity"] = sev
+    live_state["history"].append(sev)
+    if len(live_state["history"]) > 30:
+        live_state["history"].pop(0)
+    live_state["last_updated_at"] = payload.get("updated_at")
 
 # ==========================================
 # 5. SIDEBAR & MODE SELECTOR
@@ -342,7 +246,7 @@ def live_sniffer_thread(iface_name, bpf):
 st.sidebar.title("🎮 Control Panel")
 mode = st.sidebar.radio(
     "Telemetry Source Mode:",
-    ["Phase 1: CSV / Replay Simulation", "Phase 2: Live Packet Capture (Scapy)"]
+    ["Phase 1: CSV / Replay Simulation", "Phase 2: Live Lab Telemetry Stream"]
 )
 
 st.sidebar.write("---")
@@ -463,62 +367,47 @@ if mode == "Phase 1: CSV / Replay Simulation":
             time.sleep(simulation_speed)
 
 # ==========================================
-# 6B. PHASE 2 WORKFLOW (LIVE BRIDGE + SCAPY)
+# 6B. PHASE 2 WORKFLOW (LIVE LAB BRIDGE STREAM)
 # ==========================================
 else:
-    st.sidebar.subheader("Live EVE-NG Capture")
-    source_mode = st.sidebar.radio(
-        "Live Capture Source:",
-        ["GitHub Live Telemetry Bridge", "Local Interface (Scapy)"]
-    )
+    st.sidebar.subheader("Live EVE-NG Lab Stream")
     telemetry_url = st.sidebar.text_input("Telemetry JSON URL", value=LIVE_TELEMETRY_URL)
-    iface_input = st.sidebar.text_input("Interface (Local Scapy)", value="eth0")
-    bpf_input = st.sidebar.text_input("BPF Filter (Local Scapy)", value="host 10.10.10.2")
     refresh_rate = st.sidebar.slider("UI Refresh (sec)", 0.5, 3.0, 1.0, 0.25)
-
-    if source_mode == "Local Interface (Scapy)" and not SCAPY_AVAILABLE:
-        st.sidebar.warning("Scapy not installed here—using GitHub Live Telemetry Bridge.")
 
     c_start, c_stop = st.sidebar.columns(2)
     if c_start.button("▶️ Start Live", use_container_width=True):
-        if not live_state["running"]:
-            live_state["running"] = True
-            if source_mode == "Local Interface (Scapy)" and SCAPY_AVAILABLE:
-                threading.Thread(target=live_sniffer_thread, args=(iface_input, bpf_input), daemon=True).start()
+        live_state["running"] = True
 
     if c_stop.button("⏹️ Stop", use_container_width=True):
         live_state["running"] = False
 
     if st.sidebar.button("🗑️ Reset Live Stats", use_container_width=True):
-        with live_state["lock"]:
-            live_state["buffer"].clear()
-            live_state["history"] = [1, 1, 2, 1]
-            live_state["total_pkts"] = 0
-            live_state["total_threats"] = 0
-            live_state["step"] = 0
-            live_state["seeded"] = False
-            live_state["latest_meta"] = None
-            live_state["latest_severity"] = 1
-            live_state["last_updated_at"] = None
+        live_state["history"] = [1, 1, 2, 1]
+        live_state["total_pkts"] = 0
+        live_state["total_threats"] = 0
+        live_state["step"] = 0
+        live_state["seeded"] = False
+        live_state["latest_meta"] = None
+        live_state["latest_severity"] = 1
+        live_state["last_updated_at"] = None
 
-    if live_state["running"] and (source_mode == "GitHub Live Telemetry Bridge" or not SCAPY_AVAILABLE):
+    if live_state["running"]:
         try:
             payload = fetch_remote_telemetry(telemetry_url)
             apply_remote_payload(payload)
         except Exception as exc:
             st.sidebar.caption(f"Bridge sync note: {exc}")
 
-    with live_state["lock"]:
-        l_pkts = live_state["total_pkts"]
-        l_threats = live_state["total_threats"]
-        l_buf_len = (
-            live_state["latest_meta"].get("window_len", len(live_state["buffer"]))
-            if live_state["latest_meta"] else len(live_state["buffer"])
-        )
-        l_hist = list(live_state["history"])
-        l_meta = dict(live_state["latest_meta"]) if live_state["latest_meta"] else None
-        l_sev = live_state["latest_severity"]
-        l_running = live_state["running"]
+    l_pkts = live_state["total_pkts"]
+    l_threats = live_state["total_threats"]
+    l_buf_len = (
+        live_state["latest_meta"].get("window_len", 0)
+        if live_state["latest_meta"] else 0
+    )
+    l_hist = list(live_state["history"])
+    l_meta = dict(live_state["latest_meta"]) if live_state["latest_meta"] else None
+    l_sev = live_state["latest_severity"]
+    l_running = live_state["running"]
 
     stat_total_packets.metric(label="Total Packets Processed", value=l_pkts)
     stat_total_threats.metric(label="DDoS Spikes Blocked", value=l_threats)
@@ -555,7 +444,7 @@ else:
             label_text="IDLE / WAITING FOR PACKETS",
             severity=1,
             history_list=[1, 1],
-            reason_text="Click Start Live and run traffic in the EVE-NG lab (10.10.10.1 ↔ 10.10.10.2).",
+            reason_text="Click Start Live to stream EVE-NG lab telemetry (10.10.10.1 ↔ 10.10.10.2).",
         )
 
     if l_running:
