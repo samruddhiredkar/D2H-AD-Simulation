@@ -86,7 +86,7 @@ st.write("---")
 # 2. DATA LOADING FUNCTION (PHASE 1 & 2 BRIDGE)
 # ==========================================
 dataset_path = "sample_traffic.csv"
-LIVE_TELEMETRY_URL = "https://raw.githubusercontent.com/anjaliib12/D2H-AD-Simulation/main/live_telemetry.json"
+LIVE_TELEMETRY_URL = "https://raw.githubusercontent.com/samruddhiredkar/D2H-AD-Simulation/main/live_telemetry.json"
 
 @st.cache_data
 def load_network_dataset():
